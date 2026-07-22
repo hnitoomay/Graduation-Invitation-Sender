@@ -3,7 +3,7 @@ const reactHooks = require("eslint-plugin-react-hooks");
 
 module.exports = [
   {
-    ignores: ["dist/**", "node_modules/**", "tmp/**"]
+    ignores: [".vercel/**", "dist/**", "node_modules/**", "tmp/**"]
   },
   {
     files: ["**/*.js", "**/*.jsx"],

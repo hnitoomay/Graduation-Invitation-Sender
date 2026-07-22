@@ -7,18 +7,17 @@ describe("vercel configuration", () => {
       await fs.promises.readFile(path.join(__dirname, "..", "vercel.json"), "utf8")
     );
 
-    expect(vercelJson.rewrites).toEqual([
+    expect(vercelJson.routes).toEqual([
       {
-        source: "/api",
-        destination: "/api"
+        src: "^/api(?:/(.*))?$",
+        dest: "/api/index.js"
       },
       {
-        source: "/api/:path*",
-        destination: "/api/:path*"
+        handle: "filesystem"
       },
       {
-        source: "/((?!api(?:/|$)).*)",
-        destination: "/index.html"
+        src: "^/(.*)$",
+        dest: "/index.html"
       }
     ]);
   });

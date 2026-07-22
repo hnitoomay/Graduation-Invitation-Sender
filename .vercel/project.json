@@ -1,0 +1,16 @@
+{
+  "projectId": "prj_AWS54I7wsce8GZNRkVuCmX5gZAkP",
+  "orgId": "team_E7cUXN9JGEZs61RDuAp3amtw",
+  "projectName": "graduation-invitation-sender",
+  "settings": {
+    "createdAt": 1784689324951,
+    "framework": "vite",
+    "devCommand": null,
+    "installCommand": null,
+    "buildCommand": null,
+    "outputDirectory": null,
+    "rootDirectory": null,
+    "directoryListing": false,
+    "nodeVersion": "24.x"
+  }
+}
