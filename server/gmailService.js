@@ -1,4 +1,3 @@
-const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { google } = require("googleapis");
@@ -9,6 +8,7 @@ const {
   PROJECT_SAMPLE_FILES,
   STRATEGY_FIRST_LOGO_CID
 } = require("../shared/constants");
+const { getStrategyFirstLogoBuffer } = require("./strategyFirstLogo");
 const { collapseWhitespace, normalizeName, sanitizeFilename } = require("../shared/utils");
 
 const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
@@ -293,9 +293,7 @@ function isInsufficientScopeError(error) {
 }
 
 function createGmailService(config, options = {}) {
-  const logoBuffer =
-    options.logoBuffer ||
-    fs.readFileSync(path.join(config.ROOT_DIR, PROJECT_SAMPLE_FILES.logo));
+  const logoBuffer = options.logoBuffer || getStrategyFirstLogoBuffer();
   const templateLoader = options.templateLoader;
   const gmailFactory = options.gmailFactory || ((auth) => google.gmail({ version: "v1", auth }));
 
@@ -438,6 +436,7 @@ module.exports = {
   OAUTH_SCOPES,
   GMAIL_SEND_SCOPE,
   MAX_IMAGE_BYTES,
+  buildStateValue,
   createGmailService,
   createOAuthClient,
   createIdTokenVerifier,

@@ -2,6 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const { ROOT_DIR } = require("../server/config");
 const { loadDocxTemplate } = require("../server/docxTemplate");
+const { getStrategyFirstLogoBuffer } = require("../server/strategyFirstLogo");
 const {
   buildMimeMessageSource,
   createGmailService,
@@ -44,7 +45,7 @@ describe("gmail service", () => {
       subject: "Subject",
       text: "Text",
       html: '<img src="cid:strategy-first-logo" alt="Strategy First International College" />',
-      logoBuffer: await fs.promises.readFile(path.join(ROOT_DIR, "Picture1.png")),
+      logoBuffer: getStrategyFirstLogoBuffer(),
       attachmentBuffer: await fs.promises.readFile(
         path.join(ROOT_DIR, "2022B2177_Ou Ou Aung.jpg")
       ),
@@ -58,6 +59,101 @@ describe("gmail service", () => {
     expect(mime).toContain(
       'Content-Disposition: attachment; filename="Student A - Graduation Invitation.jpg"'
     );
+  });
+
+  test("does not read Picture1.png from the filesystem when generating the gmail message", async () => {
+    const originalReadFile = fs.promises.readFile.bind(fs.promises);
+    const originalReadFileSync = fs.readFileSync.bind(fs);
+    const pictureReadSpy = vi
+      .spyOn(fs.promises, "readFile")
+      .mockImplementation(async (filePath, ...args) => {
+        if (String(filePath).includes("Picture1.png")) {
+          throw new Error("Picture1.png should not be read from disk.");
+        }
+        return originalReadFile(filePath, ...args);
+      });
+    const readFileSyncSpy = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation((filePath, ...args) => {
+        if (String(filePath).includes("Picture1.png")) {
+          throw new Error("Picture1.png should not be read from disk.");
+        }
+        return originalReadFileSync(filePath, ...args);
+      });
+    const sendSpy = vi.fn().mockResolvedValue({
+      data: { id: "gmail-message-embedded-logo" }
+    });
+    const gmailService = createGmailService(
+      {
+        ROOT_DIR,
+        GOOGLE_CLIENT_ID: "client-id",
+        GOOGLE_CLIENT_SECRET: "client-secret",
+        TOKEN_ENCRYPTION_KEY:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        ALLOWED_GMAIL_SENDER: "student_registry@mystrategyfirst.com"
+      },
+      {
+        templateLoader: async () => loadDocxTemplate(ROOT_DIR),
+        gmailFactory() {
+          return {
+            users: {
+              messages: {
+                send: sendSpy
+              }
+            }
+          };
+        }
+      }
+    );
+
+    const originalNodeEnv = process.env.NODE_ENV;
+    delete process.env.VITEST;
+    process.env.NODE_ENV = "development";
+
+    try {
+      await gmailService.sendInvitation(
+        {
+          studentName: "Ou Ou Aung",
+          recipientEmail: "student@example.com",
+          sficId: "2022B2177",
+          sessionKey: "A",
+          imageFile: {
+            originalname: "2022B2177_Ou Ou Aung.jpg",
+            mimetype: "image/jpeg",
+            size: 1024,
+            buffer: Buffer.from("image")
+          }
+        },
+        {
+          tokens: {
+            refresh_token: "refresh-token"
+          },
+          verifiedEmail: "student_registry@mystrategyfirst.com",
+          grantedScopes: ["openid", "email", "https://www.googleapis.com/auth/gmail.send"]
+        }
+      );
+
+      const raw = sendSpy.mock.calls[0][0].requestBody.raw;
+      const mime = Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString(
+        "utf8"
+      );
+
+      expect(mime).toContain('src="cid:strategy-first-logo"');
+      expect(mime).toContain("Content-ID: <strategy-first-logo>");
+      expect(mime).toContain('Content-Type: image/png; name="Picture1.png"');
+      expect(mime).toContain('Content-Disposition: inline; filename="Picture1.png"');
+      expect(
+        pictureReadSpy.mock.calls.some(([filePath]) => String(filePath).includes("Picture1.png"))
+      ).toBe(false);
+      expect(
+        readFileSyncSpy.mock.calls.some(([filePath]) => String(filePath).includes("Picture1.png"))
+      ).toBe(false);
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+      process.env.VITEST = "true";
+      pictureReadSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+    }
   });
 
   test("reports missing gmail.send scope", () => {

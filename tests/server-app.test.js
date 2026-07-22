@@ -66,14 +66,18 @@ function createMockGmailService(overrides = {}) {
 }
 
 async function startServer(overrides = {}) {
-  const { app } = createApp({
-    gmailService: overrides.gmailService || createMockGmailService(),
+  const appOverrides = {
     tokenEncryptionKey:
       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     allowedGmailSender: "student_registry@mystrategyfirst.com",
     appUrl: "http://localhost:3001",
-    nodeEnv: "test"
-  });
+    nodeEnv: "test",
+    ...overrides
+  };
+  if (!Object.prototype.hasOwnProperty.call(overrides, "gmailService")) {
+    appOverrides.gmailService = createMockGmailService();
+  }
+  const { app } = createApp(appOverrides);
   const server = app.listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   return {
@@ -109,6 +113,46 @@ function makeImageFormData({ sizeBytes = 1024, fileName = "2022B2177_Ou Ou Aung.
 }
 
 describe("server application", () => {
+  test("starts and serves /api/health even when Picture1.png is unavailable from the filesystem", async () => {
+    const originalReadFile = fs.promises.readFile.bind(fs.promises);
+    const originalReadFileSync = fs.readFileSync.bind(fs);
+    const pictureReadSpy = vi
+      .spyOn(fs.promises, "readFile")
+      .mockImplementation(async (filePath, ...args) => {
+        if (String(filePath).includes("Picture1.png")) {
+          throw new Error("Picture1.png is unavailable.");
+        }
+        return originalReadFile(filePath, ...args);
+      });
+    const readFileSyncSpy = vi
+      .spyOn(fs, "readFileSync")
+      .mockImplementation((filePath, ...args) => {
+        if (String(filePath).includes("Picture1.png")) {
+          throw new Error("Picture1.png is unavailable.");
+        }
+        return originalReadFileSync(filePath, ...args);
+      });
+    const server = await startServer({ gmailService: null });
+
+    try {
+      const response = await fetch(`${server.baseUrl}/api/health`);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body).toEqual({ ok: true });
+      expect(
+        pictureReadSpy.mock.calls.some(([filePath]) => String(filePath).includes("Picture1.png"))
+      ).toBe(false);
+      expect(
+        readFileSyncSpy.mock.calls.some(([filePath]) => String(filePath).includes("Picture1.png"))
+      ).toBe(false);
+    } finally {
+      pictureReadSpy.mockRestore();
+      readFileSyncSpy.mockRestore();
+      await server.close();
+    }
+  });
+
   test("serves /api/health as JSON", async () => {
     const server = await startServer();
 
