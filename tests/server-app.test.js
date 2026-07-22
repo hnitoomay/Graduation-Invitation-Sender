@@ -109,12 +109,28 @@ function makeImageFormData({ sizeBytes = 1024, fileName = "2022B2177_Ou Ou Aung.
 }
 
 describe("server application", () => {
+  test("serves /api/health as JSON", async () => {
+    const server = await startServer();
+
+    try {
+      const response = await fetch(`${server.baseUrl}/api/health`);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(body).toEqual({ ok: true });
+    } finally {
+      await server.close();
+    }
+  });
+
   test("reports disconnected gmail safely before oauth", async () => {
     const server = await startServer();
 
     try {
       const statusResponse = await fetch(`${server.baseUrl}/api/auth/status`);
       const statusJson = await statusResponse.json();
+      expect(statusResponse.headers.get("content-type")).toContain("application/json");
       expect(statusJson.connected).toBe(false);
       expect(statusJson.address).toBe("");
     } finally {

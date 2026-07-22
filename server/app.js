@@ -185,6 +185,12 @@ function createApp(overrides = {}) {
   app.use(cookieParser());
   app.use(express.json({ limit: "1mb" }));
 
+  app.get("/api/health", (_req, res) => {
+    res.json({
+      ok: true
+    });
+  });
+
   app.get("/api/auth/status", async (req, res, next) => {
     try {
       res.json(await getGmailStatus(req, res));

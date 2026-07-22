@@ -126,8 +126,29 @@ This repository is deployable as one Vercel project.
 
 The repository already includes:
 
-- `index.js` exporting the Express app for Vercel
-- `vercel.json` with Vite output directory and SPA rewrite
+- `server/app.js` for Express app creation
+- `server/index.js` for local `app.listen()`
+- `api/index.js` and `api/[...path].js` exporting the Express app for Vercel Functions
+- `vercel.json` routing `/api` and `/api/:path*` before the SPA fallback
+
+### Final Vercel routing
+
+- `api/index.js` handles `/api`
+- `api/[...path].js` handles `/api/*`
+- `vercel.json` keeps API routing ahead of the frontend fallback
+- all non-API routes rewrite to `dist/index.html`
+- the frontend calls same-origin API paths such as `/api/auth/status` and `/api/auth/google`
+
+### Production checks
+
+After deployment, verify:
+
+```text
+https://your-project.vercel.app/api/health
+https://your-project.vercel.app/api/auth/status
+```
+
+Both endpoints should return JSON, not an HTML 404 page.
 
 ## Gmail Connection Behavior
 
