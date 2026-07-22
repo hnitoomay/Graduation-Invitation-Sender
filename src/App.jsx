@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { apiFetch, apiJson } from "./api";
+import { apiJson } from "./api";
+import {
+  parseWorkbookFile,
+  matchStudentsWithImages,
+  deriveStudentStatus,
+  isSingleValidEmail,
+  createInitialQueue,
+  resetStudentSending,
+  createFolderSummary,
+  createCsvReport
+} from "./browserData";
+import { sendStudentsSequentially } from "./sendBatch";
 
 function SummaryCard({ label, value }) {
   return (
@@ -27,26 +38,25 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function isSingleValidEmail(email) {
-  const raw = String(email || "").trim();
-  return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(raw);
-}
-
-function isReadyAndUnsent(student, queue) {
-  return (
-    student.status === "Ready" &&
-    isSingleValidEmail(student.email) &&
-    student.imageMatch?.matchStatus === "ready" &&
-    student.sendState !== "sent" &&
-    student.sendState !== "failed" &&
-    queue.currentStudentId !== student.id &&
-    !queue.pendingIds?.includes(student.id)
-  );
-}
-
 export default function App() {
-  const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [gmailStatus, setGmailStatus] = useState({
+    connected: false,
+    address: "",
+    canSend: false,
+    error: ""
+  });
+  const [students, setStudents] = useState([]);
+  const [imageFiles, setImageFiles] = useState([]);
+  const [workbookErrors, setWorkbookErrors] = useState([]);
+  const [issues, setIssues] = useState([]);
+  const [folderUpload, setFolderUpload] = useState({
+    folderName: "",
+    validImageCount: 0,
+    ignoredFileCount: 0,
+    totalImageBytes: 0
+  });
+  const [queue, setQueue] = useState(createInitialQueue());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -54,160 +64,305 @@ export default function App() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [excelFileName, setExcelFileName] = useState("");
 
-  async function fetchAuthStatus() {
-    const data = await apiJson("/api/auth/status");
-    setSession((current) =>
-      current
-        ? {
-            ...current,
-            gmail: data
-          }
-        : null
-    );
-    return data;
-  }
-
-  async function fetchSession({ initial = false } = {}) {
-    if (initial) {
-      setLoading(true);
-    }
-    const response = await apiFetch("/api/session");
-    if (!response.ok) {
-      throw new Error(`Session request failed with ${response.status}`);
-    }
-    const data = await response.json();
-    setSession(data);
-    if (initial) {
-      setLoading(false);
-    }
+  async function fetchGmailStatus() {
+    const result = await apiJson("/api/auth/status");
+    setGmailStatus(result);
+    return result;
   }
 
   useEffect(() => {
-    const searchParams = new URLSearchParams(window.location.search);
-    const gmailResult = searchParams.get("gmail");
+    const params = new URLSearchParams(window.location.search);
+    const gmailResult = params.get("gmail");
 
-    Promise.allSettled([fetchSession({ initial: true }), fetchAuthStatus()]).then((results) => {
-      const rejected = results.find((result) => result.status === "rejected");
-      if (rejected) {
-        setError(rejected.reason.message);
+    fetchGmailStatus()
+      .then((status) => {
+        if (gmailResult === "wrong_account") {
+          setError("Connected Google account does not match ALLOWED_GMAIL_SENDER.");
+        } else if (gmailResult === "missing_permission") {
+          setError("Google connected, but Gmail sending permission was not granted.");
+        } else if (gmailResult === "error") {
+          setError(status.error || "Google connection failed.");
+        }
+      })
+      .catch((requestError) => {
+        setError(requestError.message);
+      })
+      .finally(() => {
+        if (gmailResult) {
+          window.history.replaceState({}, "", window.location.pathname);
+        }
         setLoading(false);
-      }
-      if (gmailResult) {
-        window.history.replaceState({}, "", window.location.pathname);
-      }
-    });
-  }, []);
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      fetchSession().catch(() => {});
-    }, 2000);
-    return () => window.clearInterval(interval);
-  }, []);
-
-  useEffect(() => {
-    if (!session?.workbookLoaded) {
-      setExcelFileName("");
-    }
-  }, [session?.workbookLoaded]);
-
-  async function postForm(url, formData) {
-    setBusy(true);
-    setError("");
-    try {
-      const response = await apiFetch(url, { method: "POST", body: formData });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error);
-      }
-      setSession(data);
-      return data;
-    } catch (requestError) {
-      setError(requestError.message);
-      return null;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function postJson(url, body) {
-    setBusy(true);
-    setError("");
-    try {
-      const response = await apiFetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body || {})
       });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error);
-      }
-      setSession(data);
-      return data;
-    } catch (requestError) {
-      setError(requestError.message);
-      return null;
-    } finally {
-      setBusy(false);
-    }
-  }
+  }, []);
+
+  const studentsWithStatus = useMemo(
+    () =>
+      students.map((student) => {
+        const state = deriveStudentStatus(student, queue);
+        return {
+          ...student,
+          status: state.status,
+          statusReason: state.reason,
+          selectable: state.selectable
+        };
+      }),
+    [students, queue]
+  );
 
   const filteredStudents = useMemo(() => {
-    if (!session) {
-      return [];
-    }
-    return session.students.filter((student) => {
+    return studentsWithStatus.filter((student) => {
       const term = search.toLowerCase();
       const matchesSearch =
         !term ||
         student.studentName.toLowerCase().includes(term) ||
         student.sficId.toLowerCase().includes(term) ||
         student.email.toLowerCase().includes(term);
-      const matchesSession =
-        sessionFilter === "all" || student.sessionKey === sessionFilter;
+      const matchesSession = sessionFilter === "all" || student.sessionKey === sessionFilter;
       const matchesStatus =
         statusFilter === "all" || student.status.toLowerCase() === statusFilter;
       return matchesSearch && matchesSession && matchesStatus;
     });
-  }, [session, search, sessionFilter, statusFilter]);
+  }, [search, sessionFilter, statusFilter, studentsWithStatus]);
 
-  const isGmailConnected = Boolean(session?.gmail.connected);
-  const canSend = Boolean(session?.gmail.connected && session?.gmail.canSend) && !session?.demoMode;
-  const uploadsDisabled = !isGmailConnected || busy;
-  const isSending = busy || Boolean(session?.queue.currentStudentId);
-  const currentStudentName =
-    session?.students.find((student) => student.id === session.queue.currentStudentId)?.studentName || "-";
-  const gmailPermissionMessage =
-    session?.gmail.connected && !session?.gmail.canSend
-      ? (session?.gmail.error ||
-        "Google connected, but Gmail sending permission was not granted. Disconnect and reconnect, then approve the Gmail sending permission.")
-      : "";
+  const summary = useMemo(() => {
+    return {
+      totalStudents: studentsWithStatus.length,
+      sessionAStudents: studentsWithStatus.filter((student) => student.sessionKey === "A").length,
+      sessionBStudents: studentsWithStatus.filter((student) => student.sessionKey === "B").length,
+      successfullyMatched: studentsWithStatus.filter(
+        (student) => student.imageMatch?.matchStatus === "ready"
+      ).length,
+      missingImages: studentsWithStatus.filter((student) => !student.imageMatch).length,
+      errors:
+        studentsWithStatus.filter((student) => student.status === "Error").length +
+        workbookErrors.length +
+        issues.length,
+      sentDuringSession: studentsWithStatus.filter((student) => student.sendState === "sent").length,
+      failedDuringSession: studentsWithStatus.filter((student) => student.sendState === "failed").length
+    };
+  }, [issues.length, studentsWithStatus, workbookErrors.length]);
 
-  const readyUnsentStudents = session
-    ? session.students.filter((student) => isReadyAndUnsent(student, session.queue))
-    : [];
+  const readyUnsentStudents = useMemo(
+    () =>
+      studentsWithStatus.filter(
+        (student) =>
+          student.status === "Ready" &&
+          isSingleValidEmail(student.email) &&
+          student.imageMatch?.matchStatus === "ready" &&
+          student.sendState !== "sent" &&
+          student.sendState !== "failed" &&
+          queue.currentStudentId !== student.id
+      ),
+    [queue.currentStudentId, studentsWithStatus]
+  );
+
   const readyUnsentCount = readyUnsentStudents.length;
   const readySessionACount = readyUnsentStudents.filter((student) => student.sessionKey === "A").length;
   const readySessionBCount = readyUnsentStudents.filter((student) => student.sessionKey === "B").length;
-  const blockedCount = session
-    ? session.students.filter(
-      (student) => student.sendState !== "sent" && !isReadyAndUnsent(student, session.queue)
-    ).length
-    : 0;
-  const totalReadyStates = session
-    ? session.students.filter(
-      (student) => student.status === "Ready" || session.queue.currentStudentId === student.id
-    ).length
-    : 0;
-  const allReadyInvitationsSent = totalReadyStates === 0 && session?.summary.sentDuringSession > 0;
-  const sendButtonLabel =
-    readyUnsentCount > 0
-      ? `Send All ${readyUnsentCount} Ready Emails`
-      : "No Ready Emails to Send";
+  const blockedCount = studentsWithStatus.filter(
+    (student) => student.sendState !== "sent" && student.status !== "Ready"
+  ).length;
+  const currentStudentName =
+    studentsWithStatus.find((student) => student.id === queue.currentStudentId)?.studentName || "-";
+  const allReadyInvitationsSent =
+    studentsWithStatus.filter(
+      (student) => student.status === "Ready" || queue.currentStudentId === student.id
+    ).length === 0 && summary.sentDuringSession > 0;
+
+  async function handleConnectGmail() {
+    setBusy(true);
+    setError("");
+    setGmailStatus({
+      connected: false,
+      address: "",
+      canSend: false,
+      error: ""
+    });
+    try {
+      const result = await apiJson("/api/auth/google");
+      window.location.href = result.url;
+    } catch (requestError) {
+      setError(requestError.message);
+      setBusy(false);
+    }
+  }
+
+  async function handleDisconnectGmail() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await apiJson("/api/auth/google/disconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      setGmailStatus(result);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleWorkbookSelection(file) {
+    if (!file) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const parsed = await parseWorkbookFile(file);
+      const resetStudents = resetStudentSending(parsed.students);
+      const matched = matchStudentsWithImages(resetStudents, imageFiles);
+      setStudents(matched.students);
+      setWorkbookErrors(parsed.errors);
+      setIssues(matched.issues);
+      setExcelFileName(file.name);
+      setQueue(createInitialQueue());
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleImageSelection(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const matched = matchStudentsWithImages(resetStudentSending(studentsWithStatus), files);
+      setStudents(matched.students);
+      setImageFiles(files);
+      setIssues(matched.issues);
+      setFolderUpload(createFolderSummary(files));
+      setQueue(createInitialQueue());
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runSequentialSend(targetStudents) {
+    if (!targetStudents.length) {
+      return;
+    }
+
+    const jobId = window.crypto.randomUUID();
+    setBusy(true);
+    setError("");
+    setQueue({
+      pending: targetStudents.length,
+      pendingIds: targetStudents.map((student) => student.id),
+      currentStudentId: "",
+      sent: 0,
+      failed: 0,
+      remaining: targetStudents.length
+    });
+
+    try {
+      await sendStudentsSequentially({
+        students: targetStudents,
+        jobId,
+        onProgress: ({ student, pendingIds }) => {
+          setQueue((current) => ({
+            ...current,
+            currentStudentId: student.id,
+            pending: pendingIds.length,
+            pendingIds,
+            remaining: pendingIds.length + 1
+          }));
+        },
+        onResult: ({ ok, student, data, status, pendingIds }) => {
+          setStudents((current) =>
+            current.map((item) =>
+              item.id === student.id
+                ? {
+                    ...item,
+                    sendState: ok ? "sent" : "failed",
+                    sendError: ok ? "" : (data.error || `Send failed with ${status}.`),
+                    gmailMessageId: ok ? data.messageId : "",
+                    lastAttemptAt: new Date().toISOString()
+                  }
+                : item
+            )
+          );
+          setQueue((current) => ({
+            ...current,
+            currentStudentId: "",
+            sent: ok ? current.sent + 1 : current.sent,
+            failed: ok ? current.failed : current.failed + 1,
+            remaining: pendingIds.length
+          }));
+        }
+      });
+    } finally {
+      setQueue((current) => ({
+        ...current,
+        pending: 0,
+        pendingIds: [],
+        currentStudentId: "",
+        remaining: 0
+      }));
+      setBusy(false);
+    }
+  }
+
+  async function handleSendAll() {
+    const blockedMessage =
+      blockedCount > 0
+        ? `\n\nOnly Ready students will be sent. ${blockedCount} blocked students will not receive an email.`
+        : "";
+    const confirmed = window.confirm(
+      `Send ${readyUnsentCount} real invitation emails?\n\nSender:\n${gmailStatus.address}\n\nSession A: ${readySessionACount}\nSession B: ${readySessionBCount}\nBlocked: ${blockedCount}${blockedMessage}\n\nEach student will receive a separate email with their matched invitation.\n\nThis action cannot be undone.`
+    );
+    if (!confirmed) {
+      return;
+    }
+    await runSequentialSend(readyUnsentStudents);
+  }
+
+  async function handleRetryFailed() {
+    const failedStudents = studentsWithStatus.filter((student) => student.sendState === "failed");
+    const resetFailed = studentsWithStatus.map((student) =>
+      student.sendState === "failed"
+        ? {
+            ...student,
+            sendState: "not_sent",
+            sendError: "",
+            gmailMessageId: ""
+          }
+        : student
+    );
+    setStudents(resetFailed);
+    await runSequentialSend(
+      failedStudents.map((student) => ({
+        ...student,
+        sendState: "not_sent",
+        sendError: "",
+        gmailMessageId: ""
+      }))
+    );
+  }
+
+  function downloadCsvReport() {
+    const blob = new Blob([createCsvReport(studentsWithStatus, queue)], {
+      type: "text/csv;charset=utf-8"
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "graduation-session-report.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
 
   if (loading) {
-    return <div className="page-shell">Loading session...</div>;
+    return <div className="page-shell">Loading application...</div>;
   }
 
   return (
@@ -228,37 +383,29 @@ export default function App() {
         <div className="gmail-row">
           <div>
             <strong>Gmail sender:</strong>{" "}
-            {session.gmail.connected ? session.gmail.address : "Not connected"}
+            {gmailStatus.connected ? gmailStatus.address : "Not connected"}
           </div>
-          {session.demoMode ? (
-            <span className="demo-note">Demo mode - Gmail sending is disabled</span>
-          ) : session.gmail.connected ? (
+          {gmailStatus.connected ? (
             <div className="gmail-actions">
               <span className="connected-label">Connected</span>
-              <button onClick={() => postJson("/api/auth/google/disconnect")} disabled={busy}>
+              <button onClick={handleDisconnectGmail} disabled={busy}>
                 Disconnect
               </button>
             </div>
           ) : (
-            <button
-              onClick={async () => {
-                const data = await apiJson("/api/auth/google");
-                window.location.href = data.url;
-              }}
-              disabled={busy}
-            >
+            <button onClick={handleConnectGmail} disabled={busy}>
               Connect Gmail
             </button>
           )}
         </div>
-        {gmailPermissionMessage ? (
-          <div className="error-banner">{gmailPermissionMessage}</div>
+        {gmailStatus.error ? (
+          <div className="error-banner">{gmailStatus.error}</div>
         ) : null}
       </section>
 
       <section className="panel compact-panel">
         <div className="upload-stack">
-          {!isGmailConnected ? (
+          {!gmailStatus.connected ? (
             <div className="warning-banner">
               Connect your Gmail sender account before uploading student files.
             </div>
@@ -268,17 +415,8 @@ export default function App() {
             <input
               type="file"
               accept=".xlsx"
-              disabled={uploadsDisabled}
-              onChange={(event) => {
-                const file = event.target.files[0];
-                if (!file || !isGmailConnected) {
-                  return;
-                }
-                setExcelFileName(file.name);
-                const formData = new FormData();
-                formData.append("workbook", file);
-                postForm("/api/upload/workbook", formData);
-              }}
+              disabled={busy || !gmailStatus.connected}
+              onChange={(event) => handleWorkbookSelection(event.target.files?.[0])}
             />
           </label>
           <label className="upload-row">
@@ -288,54 +426,40 @@ export default function App() {
               multiple
               webkitdirectory=""
               directory=""
-              disabled={uploadsDisabled}
-              onChange={(event) => {
-                const files = Array.from(event.target.files || []);
-                if (!files.length || !isGmailConnected) {
-                  return;
-                }
-                const formData = new FormData();
-                const firstPath = files[0].webkitRelativePath || files[0].name;
-                const folderName = firstPath.includes("/") ? firstPath.split("/")[0] : "";
-                formData.append("imageFolderName", folderName);
-                files.forEach((file) => {
-                  formData.append("imageFolderFiles", file, file.name);
-                  formData.append("imageFolderRelativePaths", file.webkitRelativePath || file.name);
-                });
-                postForm("/api/upload/images", formData);
-              }}
+              disabled={busy || !gmailStatus.connected}
+              onChange={(event) => handleImageSelection(event.target.files)}
             />
           </label>
           <div className="upload-meta">
             <div>
-              <strong>Excel file:</strong> {(excelFileName || session.workbookLoaded) ? (excelFileName || "Uploaded") : "Not uploaded"}
+              <strong>Excel file:</strong> {excelFileName || "Not uploaded"}
             </div>
             <div>
-              <strong>Folder:</strong> {session.folderUpload.folderName || "Not selected"}
+              <strong>Folder:</strong> {folderUpload.folderName || "Not selected"}
             </div>
             <div>
-              <strong>Valid images:</strong> {session.folderUpload.validImageCount}
+              <strong>Valid images:</strong> {folderUpload.validImageCount}
             </div>
             <div>
-              <strong>Ignored files:</strong> {session.folderUpload.ignoredFileCount}
+              <strong>Ignored files:</strong> {folderUpload.ignoredFileCount}
             </div>
             <div>
-              <strong>Total image size:</strong> {formatBytes(session.folderUpload.totalImageBytes)}
+              <strong>Total image size:</strong> {formatBytes(folderUpload.totalImageBytes)}
             </div>
           </div>
         </div>
       </section>
 
       <section className="summary-grid compact-summary">
-        <SummaryCard label="Total students" value={session.summary.totalStudents} />
-        <SummaryCard label="Session A" value={session.summary.sessionAStudents} />
-        <SummaryCard label="Session B" value={session.summary.sessionBStudents} />
-        <SummaryCard label="Valid images" value={session.folderUpload.validImageCount} />
-        <SummaryCard label="Matched" value={session.summary.successfullyMatched} />
-        <SummaryCard label="Missing" value={session.summary.missingImages} />
-        <SummaryCard label="Errors" value={session.summary.errors} />
-        <SummaryCard label="Sent" value={session.summary.sentDuringSession} />
-        <SummaryCard label="Failed" value={session.summary.failedDuringSession} />
+        <SummaryCard label="Total students" value={summary.totalStudents} />
+        <SummaryCard label="Session A" value={summary.sessionAStudents} />
+        <SummaryCard label="Session B" value={summary.sessionBStudents} />
+        <SummaryCard label="Valid images" value={folderUpload.validImageCount} />
+        <SummaryCard label="Matched" value={summary.successfullyMatched} />
+        <SummaryCard label="Missing" value={summary.missingImages} />
+        <SummaryCard label="Errors" value={summary.errors} />
+        <SummaryCard label="Sent" value={summary.sentDuringSession} />
+        <SummaryCard label="Failed" value={summary.failedDuringSession} />
       </section>
 
       <section className="panel compact-panel student-review-card">
@@ -385,19 +509,20 @@ export default function App() {
                     <input
                       value={student.email}
                       onChange={(event) => {
-                        const email = event.target.value;
-                        setSession((current) => ({
-                          ...current,
-                          students: current.students.map((item) =>
-                            item.id === student.id ? { ...item, email } : item
+                        const nextEmail = event.target.value;
+                        setStudents((current) =>
+                          current.map((item) =>
+                            item.id === student.id
+                              ? {
+                                  ...item,
+                                  email: nextEmail,
+                                  emailRaw: nextEmail,
+                                  hasMultipleEmails: false
+                                }
+                              : item
                           )
-                        }));
+                        );
                       }}
-                      onBlur={(event) =>
-                        postJson(`/api/students/${encodeURIComponent(student.id)}/email`, {
-                          email: event.target.value
-                        })
-                      }
                     />
                   </td>
                   <td>{student.workbookSheet}</td>
@@ -425,41 +550,31 @@ export default function App() {
             </div>
             <button
               className="primary-send-button"
-              disabled={!canSend || readyUnsentCount === 0 || isSending}
-              onClick={async () => {
-                const blockedMessage = blockedCount > 0
-                  ? `\n\nOnly Ready students will be sent. ${blockedCount} blocked students will not receive an email.`
-                  : "";
-                const confirmed = window.confirm(
-                  `Send ${readyUnsentCount} real invitation emails?\n\nSender:\n${session.gmail.address}\n\nSession A: ${readySessionACount}\nSession B: ${readySessionBCount}\nBlocked: ${blockedCount}${blockedMessage}\n\nEach student will receive a separate email with their matched invitation.\n\nThis action cannot be undone.`
-                );
-                if (!confirmed) {
-                  return;
-                }
-                await postJson("/api/send/batch");
-              }}
+              disabled={!gmailStatus.canSend || readyUnsentCount === 0 || busy}
+              onClick={handleSendAll}
             >
-              {sendButtonLabel}
+              {readyUnsentCount > 0
+                ? `Send All ${readyUnsentCount} Ready Emails`
+                : "No Ready Emails to Send"}
             </button>
             {allReadyInvitationsSent ? (
               <p className="success-note">All Ready invitations have been sent.</p>
             ) : null}
-            {session.queue.failed > 0 ? (
-              <button disabled={!canSend || isSending} onClick={() => postJson("/api/send/retry-failed")}>
+            {summary.failedDuringSession > 0 ? (
+              <button disabled={!gmailStatus.canSend || busy} onClick={handleRetryFailed}>
                 Retry Failed
               </button>
             ) : null}
-            {gmailPermissionMessage ? <p className="subtle">{gmailPermissionMessage}</p> : null}
-            <a className="button-link" href="/api/report.csv">
+            <button className="button-link" onClick={downloadCsvReport}>
               Download Temporary CSV Report
-            </a>
+            </button>
           </div>
           <div className="status-card">
-            <p>Pending: {session.queue.pending}</p>
+            <p>Pending: {queue.pending}</p>
             <p>Currently sending: {currentStudentName}</p>
-            <p>Sent: {session.queue.sent}</p>
-            <p>Failed: {session.queue.failed}</p>
-            <p>Remaining: {session.queue.remaining}</p>
+            <p>Sent: {queue.sent}</p>
+            <p>Failed: {queue.failed}</p>
+            <p>Remaining: {queue.remaining}</p>
           </div>
         </div>
       </section>
@@ -469,8 +584,10 @@ export default function App() {
           <h2>Validation Results</h2>
         </div>
         <ul className="issues-list">
-          {session.issues.length ? (
-            session.issues.map((issue, index) => <li key={`${issue.type}-${index}`}>{issue.message}</li>)
+          {[...workbookErrors, ...issues].length ? (
+            [...workbookErrors, ...issues].map((issue, index) => (
+              <li key={`${issue.type}-${index}`}>{issue.message}</li>
+            ))
           ) : (
             <li>No current validation issues.</li>
           )}

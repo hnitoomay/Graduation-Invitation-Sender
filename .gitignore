@@ -1,5 +1,3 @@
-.data/
-gmail-auth.enc
 node_modules/
 dist/
 .env

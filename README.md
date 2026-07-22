@@ -1,83 +1,88 @@
 # Graduation Invitation Sender
 
-Temporary single-page web application for parsing a graduation workbook, matching invitation images, previewing personalized emails, and sending one Gmail message per student without permanent storage.
+React/Vite frontend plus Express backend for parsing the graduation workbook in the browser, matching invitation images locally, and sending one Gmail message per student through Google OAuth.
 
-## Stack
+## Current Architecture
 
-- React with Vite
-- Express on Node.js
-- Plain JavaScript
-- Plain CSS
-- In-memory session state only
+- React + Vite frontend
+- Express backend
+- Google OAuth scopes:
+  - `openid`
+  - `email`
+  - `https://www.googleapis.com/auth/gmail.send`
+- Gmail OAuth token bundle stored only in an encrypted HttpOnly cookie
+- Excel data, image files, matches, send progress, and CSV report kept only in browser memory
+- One student and one invitation image per `/api/send-one` request
+- No database
+- No Vercel Blob, KV, Redis, or persistent filesystem storage
+- No local token files
 
-## Session model
+Refreshing the page clears:
 
-- Browser authentication uses an HTTP-only session cookie with no persistent expiration date.
-- Server-side session data lives only in memory and expires automatically after two hours by default.
-- Gmail OAuth tokens, parsed students, image matches, queue state, and send history are never written to a database.
-- Temporary uploaded files are stored under `tmp/` only for the active session and are deleted on reset, expiration, and server shutdown when practical.
+- parsed workbook data
+- selected images
+- matches
+- send progress
+- temporary report data
 
-## Environment setup
+Refreshing or reopening the browser keeps Gmail connected as long as the encrypted cookie remains.
 
-Copy `.env.example` to `.env` and set:
+## Environment Variables
 
-```bash
-PORT=3001
-FRONTEND_URL=http://localhost:5173
-SESSION_SECRET=replace-with-a-random-secret
+Copy `.env.example` to `.env` locally and set:
+
+```env
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
-GOOGLE_REDIRECT_URI=http://localhost:3001/api/auth/google/callback
-DEMO_MODE=true
-SESSION_TTL_MS=7200000
+TOKEN_ENCRYPTION_KEY=
+ALLOWED_GMAIL_SENDER=
+APP_URL=
 ```
 
-`DEMO_MODE=true` is the default development mode. In demo mode:
+Notes:
 
-- workbook parsing works
-- image matching works
-- email previews work
-- Gmail connect is simulated
-- sends are simulated
-- no real Gmail message is sent
+- `APP_URL` is the backend application URL.
+- Local development typically uses `APP_URL=http://localhost:3001`.
+- Production should use your deployed Vercel URL, for example `https://your-project.vercel.app`.
+- `TOKEN_ENCRYPTION_KEY` must decode to exactly 32 bytes. A 64-character hex value works well.
+- Never commit `.env`.
 
-## Google Cloud OAuth configuration
+Generate a suitable encryption key with:
 
-When you switch to live mode with `DEMO_MODE=false`, configure Google Cloud as follows:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
 
-1. Create or use a Google Cloud project.
-2. Enable the Gmail API.
-3. Configure the OAuth consent screen.
-4. Create an OAuth 2.0 Client ID of type `Web application`.
-5. Add this authorized redirect URI exactly:
+## Google Cloud OAuth Setup
+
+1. Enable the Gmail API in your Google Cloud project.
+2. Configure the OAuth consent screen.
+3. Create an OAuth client for a web application.
+4. Add the local redirect URI:
 
 ```text
 http://localhost:3001/api/auth/google/callback
 ```
 
-6. Add this authorized JavaScript origin:
+5. Add the production redirect URI:
 
 ```text
-http://localhost:3001
+https://your-project.vercel.app/api/auth/google/callback
 ```
 
-7. Put the client ID and client secret into `.env`.
+6. Set `ALLOWED_GMAIL_SENDER` to the exact Gmail or Google Workspace sender address that is allowed to connect.
 
-The server requests only the minimum Gmail scope needed for sending:
+If the connected Google account email does not exactly match `ALLOWED_GMAIL_SENDER`, the backend rejects the connection and discards the returned tokens.
 
-```text
-https://www.googleapis.com/auth/gmail.send
-```
+## Local Development
 
-## Run
-
-Install dependencies if needed:
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-Start both servers:
+Run the backend and frontend:
 
 ```bash
 npm run dev
@@ -95,27 +100,63 @@ Backend:
 http://localhost:3001
 ```
 
-Production build:
+## Vercel Deployment
+
+This repository is deployable as one Vercel project.
+
+### GitHub setup
+
+1. Initialize Git if needed.
+2. Confirm `.env` is ignored.
+3. Commit the project.
+4. Push it to GitHub.
+
+### Vercel import
+
+1. In Vercel, choose `Add New -> Project`.
+2. Import the GitHub repository.
+3. Add these environment variables in `Project -> Settings -> Environment Variables`:
+   - `GOOGLE_CLIENT_ID`
+   - `GOOGLE_CLIENT_SECRET`
+   - `TOKEN_ENCRYPTION_KEY`
+   - `ALLOWED_GMAIL_SENDER`
+   - `APP_URL`
+4. Set `APP_URL` to the deployed production URL.
+5. Deploy.
+
+The repository already includes:
+
+- `index.js` exporting the Express app for Vercel
+- `vercel.json` with Vite output directory and SPA rewrite
+
+## Gmail Connection Behavior
+
+- The UI shows `Connect Gmail` when there is no valid encrypted Gmail cookie.
+- After successful OAuth, the backend stores the token bundle in an encrypted HttpOnly cookie.
+- The cookie uses:
+  - `httpOnly: true`
+  - `sameSite: "lax"`
+  - `secure: true` in production
+  - long expiration
+- `Disconnect` clears the cookie.
+- Clearing browser cookies may require reconnecting, which is expected.
+
+## Security Model
+
+- Gmail OAuth tokens are never exposed to React code.
+- Tokens are never stored in local files, a database, localStorage, or Blob storage.
+- Dynamic email values are sanitized.
+- Send requests require a connected Gmail cookie.
+- Email-sending POST requests require same-origin validation.
+- Tests do not send real Gmail messages.
+
+## Production Build
 
 ```bash
 npm run build
 ```
 
-## Workflow
-
-1. Upload the Excel workbook.
-2. Upload invitation images or a ZIP.
-3. Review matching and validation.
-4. Connect Gmail.
-5. Preview the generated email for any student.
-6. Send a test email if needed.
-7. Send a batch of up to 100 students.
-8. Download the temporary CSV report if needed.
-9. Reset the session to clear all temporary state.
-
-## Tests
-
-Run:
+## Test
 
 ```bash
 npm test

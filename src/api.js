@@ -1,4 +1,6 @@
-export const API_BASE = `${window.location.protocol}//${window.location.hostname}:3001`;
+export const API_BASE = import.meta.env.DEV
+  ? "http://localhost:3001"
+  : "";
 
 export async function apiFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
