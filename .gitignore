@@ -1,0 +1,13 @@
+.data/
+gmail-auth.enc
+node_modules/
+dist/
+.env
+.env.local
+tmp/
+coverage/
+*.log
+!2022B2177_Ou Ou Aung.jpg
+!2022B4575_Yamin Myat.jpg
+!Email Body.docx
+!Graduation List 2026 Bachelor's Student.xlsx
